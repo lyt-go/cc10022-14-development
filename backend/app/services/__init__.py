@@ -13,6 +13,8 @@ from app.services.survivorship_rule import SurvivorshipRuleService
 from app.services.data_import_rule import DataImportRuleService
 from app.services.import_batch import ImportBatchService
 from app.services.record_lineage import RecordLineageService
+from app.services.field_ownership import FieldOwnershipService
+from app.services.field_distribution import FieldDistributionService
 from app.services.mdm_sync import MdmSyncService
 from app.services.mdm_version import MdmVersionService
 from app.services.auto_match_job import AutoMatchJobService
@@ -33,6 +35,8 @@ SERVICES: dict[str, BaseModuleService] = {
     "data_import_rule": DataImportRuleService(),
     "import_batch": ImportBatchService(),
     "record_lineage": RecordLineageService(),
+    "field_ownership": FieldOwnershipService(),
+    "field_distribution": FieldDistributionService(),
     "mdm_sync": MdmSyncService(),
     "mdm_version": MdmVersionService(),
     "auto_match_job": AutoMatchJobService(),

@@ -27,6 +27,8 @@ from app.services.mdm_api import MdmApiService
 from app.services.mdm_sync import MdmSyncService
 from app.services.mdm_version import MdmVersionService
 from app.services.mdm_dashboard import MdmDashboardService
+from app.services.field_ownership import FieldOwnershipService
+from app.services.field_distribution import FieldDistributionService
 
 
 class TestBusinessChains:
@@ -283,6 +285,84 @@ class TestBusinessChains:
         assert "duplicate_clusters" in summary
 
 
+    # ── 链路7: 分发同步→字段归属分发明细→回执复核→黄金记录写回 ──
+    def test_chain7_field_ownership_receipt_writeback(self):
+        """同一黄金ID回执里两个不同归属字段：电话采纳、客户编码拒绝且可追溯。"""
+        golden_svc = GoldenRecordService()
+        created = golden_svc.create_golden_record(
+            "customer",
+            {"姓名": "张三", "电话": "13800000000", "客户编码": "CUST-001"},
+            ["SRC-001"],
+        )
+        assert created["ok"] is True
+        golden_id = created["golden_record"]["黄金ID"]
+
+        # 字段归属已随黄金记录初始化：电话归客服台，客户编码归主数据组。
+        ownership_svc = FieldOwnershipService()
+        assert ownership_svc.can_target_write("customer", "电话", "客服台") is True
+        assert ownership_svc.can_target_write("customer", "客户编码", "客服台") is False
+
+        # 客服同次送来新电话和另一个客户编码。
+        sync_svc = MdmSyncService()
+        receipt = {
+            "黄金ID": golden_id,
+            "目标系统": "客服台",
+            "来源系统": "客服台",
+            "电话": "13911112222",
+            "客户编码": "CUST-999",
+        }
+        received = sync_svc.receive_target_receipt(4, receipt)
+        assert received["ok"] is True, f"回执接收失败: {received}"
+        items = {item["字段"]: item for item in received["分发明细"]}
+        assert items["电话"]["判定"] == "可采纳", items["电话"]
+        assert items["客户编码"]["判定"] == "拒绝", items["客户编码"]
+        # 明细必须能对回本地值和远程值。
+        assert items["电话"]["本地值"] == "13800000000"
+        assert items["电话"]["远程值"] == "13911112222"
+        assert items["客户编码"]["本地值"] == "CUST-001"
+        assert items["客户编码"]["远程值"] == "CUST-999"
+
+        # 复核：采纳电话，拒绝客户编码，然后写回黄金记录。
+        receipt_id = received["回执编号"]
+        result = sync_svc.confirm_receipt(
+            receipt_id,
+            {"电话": "采纳", "客户编码": "拒绝"},
+            reviewer="复核-小王",
+        )
+        assert result["applied_count"] == 1, f"应只写回电话: {result}"
+        written = golden_svc.query_golden_record(golden_id)
+        assert written["电话"] == "13911112222"
+        assert written["客户编码"] == "CUST-001", "越权回传不得改写客户编码"
+
+        # 客户编码仍可追到主源（主数据组），并留有可回查的变更凭据。
+        code_trace = golden_svc.trace_field_source(golden_id, "客户编码")
+        assert code_trace["当前值"] == "CUST-001"
+        assert code_trace["主源系统"] == "主数据组"
+        assert code_trace["变更凭据"] == []
+        credentials = golden_svc.query_change_credentials(
+            golden_id, receipt_id=receipt_id, field="电话")
+        assert len(credentials) == 1
+        assert credentials[0]["旧值"] == "13800000000"
+        assert credentials[0]["新值"] == "13911112222"
+
+        # 重送回执：已采纳的电话不得变成第二次变更。
+        replay = sync_svc.receive_target_receipt(4, receipt)
+        assert replay["回执编号"] == receipt_id, "同一回执重送应使用同一编号"
+        replay_result = sync_svc.confirm_receipt(
+            replay["回执编号"], {"电话": "采纳", "客户编码": "拒绝"})
+        assert replay_result["applied_count"] == 0, "重送不应产生新变更"
+        final = golden_svc.query_golden_record(golden_id)
+        assert final["电话"] == "13911112222"
+        assert len(golden_svc.query_change_credentials(golden_id, field="电话")) == 1
+
+        # 分发明细仍保留两项各自的判定，供客服台与复核员对回。
+        details = FieldDistributionService().query_distribution(
+            golden_id=golden_id, receipt_id=receipt_id)
+        by_field = {item["字段"]: item for item in details}
+        assert by_field["电话"]["确认状态"] == "已采纳"
+        assert by_field["客户编码"]["确认状态"] == "已拒绝"
+
+
 if __name__ == "__main__":
     runner = TestBusinessChains()
     tests = [
@@ -292,6 +372,7 @@ if __name__ == "__main__":
         ("链路4: 清洗→优胜策略→版本快照", runner.test_chain4_survivorship_to_version),
         ("链路5: 黄金记录→查询接口→分发同步", runner.test_chain5_golden_to_sync),
         ("链路6: 参考数据→实体模型→质量统计→看板", runner.test_chain6_reference_to_dashboard),
+        ("链路7: 字段归属→回执复核→黄金记录写回", runner.test_chain7_field_ownership_receipt_writeback),
     ]
 
     passed = 0
